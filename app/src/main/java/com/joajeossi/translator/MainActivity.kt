@@ -469,7 +469,8 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                 400, 401, 403 -> if (e.body.contains("API key", true) || e.body.contains("API_KEY", true))
                     "열쇠가 맞지 않아요. [🔑 열쇠]를 눌러 다시 넣어 주세요." else "Gemini 오류(${e.code}). 잠시 후 다시 말해 주세요."
                 429 -> "무료 사용량을 잠깐 넘었어요. 1분쯤 뒤에 다시 말해 주세요."
-                else -> "Gemini 오류(${e.code}). 잠시 후 다시 말해 주세요."
+                500, 502, 503, 504 -> "구글 서버가 지금 바빠요. 한 번 더 말해 주세요."
+                else -> "Gemini 오류(${e.code}). 한 번 더 말해 주세요."
             }
             runOnUiThread { if (running) { status.text = msg; status.postDelayed({ listenOnce() }, 2500) } }
             return

@@ -15,7 +15,7 @@ import kotlin.math.sqrt
 /**
  * 인터넷(구글 Gemini)으로 "무슨 언어로 말했는지"를 알아서 구분하는 통역기.
  *
- * 1) 마이크로 계속 듣다가, 소리가 커지면 말 시작 / 1.2초쯤 조용하면 말 끝으로 (잠깐 멈췄다 이어 말해도 한 마디로) 본다.
+ * 1) 마이크로 계속 듣다가, 소리가 커지면 말 시작 / 1초쯤 조용하면 말 끝으로 (잠깐 멈췄다 이어 말해도 한 마디로) 본다.
  * 2) 그 한 마디를 녹음 파일(WAV)로 만들어 Gemini 에 보낸다.
  * 3) Gemini 가 "어느 언어인지 + 받아 적은 글 + 반대 언어로 번역"을 돌려준다.
  *
@@ -167,24 +167,41 @@ class GeminiInterpreter(
         val contents = JSONArray().put(JSONObject().put("role", "user")
             .put("parts", JSONArray().put(JSONObject().put("text", prompt)).put(audioPart)))
 
+        // 구글 서버가 바쁘면(503 등) 다른 모델로 바로 바꿔 보고, 다 바쁘면 잠깐 쉬었다가 한 번 더 돈다.
         var lastError: Exception? = null
-        for (model in MODELS) {
-            for (withThinkingOff in listOf(true, false)) {
-                val config = JSONObject().put("temperature", 0).put("responseMimeType", "application/json")
-                if (withThinkingOff) config.put("thinkingConfig", JSONObject().put("thinkingBudget", 0))
-                val body = JSONObject().put("contents", contents).put("generationConfig", config)
-                try {
-                    return parse(post(model, body.toString()))
-                } catch (e: HttpError) {
-                    lastError = e
-                    if (e.code == 400 && withThinkingOff && !e.body.contains("API key", ignoreCase = true)) continue
-                    if (e.code == 404) break               // 이 모델 이름이 없으면 다음 모델
-                    throw e
+        for (round in 0 until 2) {
+            if (round > 0) Thread.sleep(800)
+            val order = (listOfNotNull(workingModel) + MODELS).distinct()
+            for (model in order) {
+                if (model in missingModels) continue
+                for (withThinkingOff in listOf(true, false)) {
+                    val config = JSONObject().put("temperature", 0).put("responseMimeType", "application/json")
+                    if (withThinkingOff) config.put("thinkingConfig", JSONObject().put("thinkingBudget", 0))
+                    val body = JSONObject().put("contents", contents).put("generationConfig", config)
+                    try {
+                        val result = parse(post(model, body.toString()))
+                        workingModel = model            // 다음엔 잘 되던 모델부터 쓴다
+                        return result
+                    } catch (e: HttpError) {
+                        lastError = e
+                        val keyProblem = e.body.contains("API key", true) || e.body.contains("API_KEY", true)
+                        if (keyProblem) throw e         // 열쇠 문제는 다른 모델로 바꿔도 소용없다
+                        if (e.code == 400 && withThinkingOff) continue   // 이 모델은 생각 끄기 옵션을 모름
+                        if (e.code == 404) missingModels.add(model)      // 없는 모델 이름
+                        if (workingModel == model) workingModel = null
+                        break                            // 바쁨(503/500/429) 등: 다음 모델로
+                    } catch (e: Exception) {
+                        lastError = e                    // 인터넷 끊김, 응답 해석 실패 등: 다음 모델로
+                        break
+                    }
                 }
             }
         }
         throw lastError ?: RuntimeException("Gemini 응답 없음")
     }
+
+    @Volatile private var workingModel: String? = null
+    private val missingModels = java.util.Collections.synchronizedSet(mutableSetOf<String>())
 
     class HttpError(val code: Int, val body: String) : RuntimeException("HTTP $code")
 
@@ -193,8 +210,9 @@ class GeminiInterpreter(
             .openConnection() as HttpURLConnection
         try {
             conn.requestMethod = "POST"
-            conn.connectTimeout = 10_000
-            conn.readTimeout = 30_000
+            // 응답이 너무 늦으면 기다리지 말고 다음 모델로 (대기 시간 줄이기)
+            conn.connectTimeout = 5_000
+            conn.readTimeout = 9_000
             conn.doOutput = true
             conn.setRequestProperty("Content-Type", "application/json; charset=utf-8")
             conn.setRequestProperty("x-goog-api-key", apiKey)
@@ -229,11 +247,12 @@ class GeminiInterpreter(
         private const val FRAME = 480                     // 30ms
         private const val PRE_ROLL_FRAMES = 10            // 0.3초
         private const val START_FRAMES = 3                // 0.09초 이상 소리가 크면 말 시작
-        // 말하다 잠깐 멈춰도(생각하느라) 끊기지 않게 1.2초 조용해야 말 끝으로 본다
-        private const val END_SILENCE_FRAMES = 40
+        // 말하다 잠깐 멈춰도(생각하느라) 끊기지 않게 1초 조용해야 말 끝으로 본다
+        private const val END_SILENCE_FRAMES = 33
         private const val MIN_VOICED_FRAMES = 10          // 0.3초보다 짧은 소리는 무시 (기침, 탁 소리 등)
         private const val MAX_FRAMES = 500                // 한 마디 최대 15초
         /** 앞에서부터 써 보고, 없는 모델이면 다음 것 */
-        private val MODELS = listOf("gemini-flash-latest", "gemini-2.5-flash", "gemini-2.0-flash")
+        /** 가장 빠른 lite 모델부터 (대기 시간 줄이기). 바쁘거나 없으면 다음 것 */
+        private val MODELS = listOf("gemini-2.5-flash-lite", "gemini-flash-lite-latest", "gemini-2.5-flash", "gemini-flash-latest", "gemini-2.0-flash")
     }
 }
