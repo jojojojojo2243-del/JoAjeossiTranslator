@@ -102,12 +102,41 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         }
         requestAudioPermission()
         configureTranslators()
+    }
 
-        // GitHub에 새 버전이 올라와 있으면 업데이트를 물어본다
+    override fun onResume() {
+        super.onResume()
+        // 앱을 열 때마다 GitHub에 새 버전이 있는지 보고, 있으면 알아서 받아서 설치한다
         AppUpdater.checkForUpdate(this)
     }
 
     // ───────────────────────── 화면 ─────────────────────────
+
+    // 맨 아래 줄: "버전 1.0.30"  [업데이트 확인]
+    private fun buildVersionRow(): LinearLayout {
+        val versionText = TextView(this).apply {
+            text = "버전 ${AppUpdater.currentVersionName(this@MainActivity)}"
+            textSize = 13f; setTextColor(0xFF666666.toInt())
+        }
+        val checkButton = TextView(this).apply {
+            text = "업데이트 확인"
+            textSize = 13f; setTextColor(blue)
+            background = rounded(0xFFFFFFFF.toInt(), 6, blue)
+            setPadding(dp(10), dp(4), dp(10), dp(4))
+            setOnClickListener { AppUpdater.checkForUpdate(this@MainActivity, manual = true) }
+        }
+        val updateStatus = TextView(this).apply {
+            textSize = 12f; setTextColor(0xFF666666.toInt())
+            gravity = Gravity.END; setPadding(dp(8), 0, dp(8), 0)
+        }
+        AppUpdater.onStatus = { msg -> updateStatus.text = msg }
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            addView(versionText, LinearLayout.LayoutParams(-2, -2))
+            addView(updateStatus, LinearLayout.LayoutParams(0, -2, 1f))
+            addView(checkButton, LinearLayout.LayoutParams(-2, -2))
+        }
+    }
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
@@ -182,6 +211,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         inner.addView(status, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(10) })
         inner.addView(logScroll, LinearLayout.LayoutParams(-1, 0, 1f).apply { topMargin = dp(8) })
         inner.addView(buttonRow, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(10) })
+        inner.addView(buildVersionRow(), LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
         root.addView(inner, LinearLayout.LayoutParams(-1, -1))
         setContentView(root)
         keepClearOfSystemBars(root)

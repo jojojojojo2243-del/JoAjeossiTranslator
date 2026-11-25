@@ -2,43 +2,75 @@ package com.joajeossi.translator
 
 import android.app.Activity
 import android.app.AlertDialog
-import android.app.DownloadManager
+import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
+import android.content.pm.PackageInstaller
 import android.net.Uri
 import android.os.Build
-import android.os.Environment
 import android.provider.Settings
 import android.widget.Toast
 import org.json.JSONObject
+import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 
 /**
- * 앱을 켤 때 GitHub 최신 릴리스를 확인해서, 지금 설치된 것보다 새 버전이 있으면
- * 다운로드 후 설치 화면을 띄워 준다.
+ * 줌 앱처럼 알아서 업데이트한다.
  *
- * 릴리스 태그는 "v<versionCode>" 형식(예: v105)이고, APK 파일이 첨부되어 있다.
- * (.github/workflows/android.yml 이 main 에 올라갈 때마다 자동으로 만든다)
+ * 1. 앱을 켜면 GitHub 최신 릴리스(태그 "v<버전번호>")를 확인한다.
+ * 2. 지금보다 새 버전이면 묻지 않고 뒤에서 APK 를 받는다.
+ * 3. 받은 뒤 바로 설치한다.
+ *    - Android 12 이상이고, 이 앱이 스스로 업데이트한 적이 있으면 아무것도 안 눌러도 설치된다.
+ *    - 그 밖의 경우에는 안드로이드가 "업데이트할까요?"를 한 번 묻는다 (보안상 꼭 필요).
+ *
+ * 화면의 [업데이트 확인] 버튼을 누르면 같은 일을 바로 하고, 결과를 알려 준다.
  */
 object AppUpdater {
     private const val LATEST_RELEASE_URL =
-        "https://api.github.com/repos/jojojojojo2243-del/joajeossitranslator/releases/latest"
-    private const val APK_FILE_NAME = "JoAjeossiTranslator-update.apk"
+        "https://api.github.com/repos/jojojojojo2243-del/JoAjeossiTranslator/releases/latest"
+    private const val ACTION_INSTALL_RESULT = "com.joajeossi.translator.INSTALL_RESULT"
 
-    fun checkForUpdate(activity: Activity) {
+    @Volatile private var busy = false
+
+    /** 화면에 지금 상태를 보여 주고 싶을 때 쓰는 통로 (예: "새 버전 받는 중…") */
+    var onStatus: ((String) -> Unit)? = null
+
+    @Suppress("DEPRECATION")
+    fun currentVersionCode(context: Context): Long {
+        val info = context.packageManager.getPackageInfo(context.packageName, 0)
+        return if (Build.VERSION.SDK_INT >= 28) info.longVersionCode else info.versionCode.toLong()
+    }
+
+    fun currentVersionName(context: Context): String =
+        context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "?"
+
+    /** @param manual 사람이 [업데이트 확인]을 누른 경우 true: 결과를 꼭 알려 준다. */
+    fun checkForUpdate(activity: Activity, manual: Boolean = false) {
+        if (busy) {
+            if (manual) toast(activity, "이미 업데이트를 받고 있어요.")
+            return
+        }
+        busy = true
+        if (manual) status(activity, "새 버전 확인 중…")
         Thread {
             try {
-                val release = fetchLatestRelease() ?: return@Thread
-                if (release.versionCode > currentVersionCode(activity)) {
-                    activity.runOnUiThread {
-                        if (!activity.isFinishing) showUpdateDialog(activity, release)
+                val release = fetchLatestRelease()
+                when {
+                    release == null -> {
+                        busy = false
+                        if (manual) status(activity, "새 버전 정보를 찾지 못했어요. (아직 올라간 버전이 없어요)")
                     }
+                    release.versionCode <= currentVersionCode(activity) -> {
+                        busy = false
+                        if (manual) status(activity, "최신 버전이에요. (${currentVersionName(activity)})")
+                    }
+                    else -> activity.runOnUiThread { startUpdate(activity, release) }
                 }
-            } catch (_: Exception) {
-                // 인터넷이 안 되거나 GitHub 응답이 없으면 조용히 넘어간다.
+            } catch (e: Exception) {
+                busy = false
+                if (manual) status(activity, "업데이트 확인 실패: 인터넷 연결을 확인하세요.")
             }
         }.start()
     }
@@ -59,11 +91,7 @@ object AppUpdater {
             for (i in 0 until assets.length()) {
                 val asset = assets.getJSONObject(i)
                 if (asset.optString("name").endsWith(".apk")) {
-                    return Release(
-                        code,
-                        json.optString("name", tag),
-                        asset.getString("browser_download_url")
-                    )
+                    return Release(code, json.optString("name", tag), asset.getString("browser_download_url"))
                 }
             }
             return null
@@ -72,86 +100,127 @@ object AppUpdater {
         }
     }
 
-    @Suppress("DEPRECATION")
-    private fun currentVersionCode(context: Context): Long {
-        val info = context.packageManager.getPackageInfo(context.packageName, 0)
-        return if (Build.VERSION.SDK_INT >= 28) info.longVersionCode else info.versionCode.toLong()
-    }
-
-    private fun showUpdateDialog(activity: Activity, release: Release) {
-        AlertDialog.Builder(activity)
-            .setTitle("새 버전이 있어요")
-            .setMessage("${release.name}\n\n지금 업데이트할까요?")
-            .setPositiveButton("업데이트") { _, _ -> startUpdate(activity, release) }
-            .setNegativeButton("나중에", null)
-            .show()
-    }
-
     private fun startUpdate(activity: Activity, release: Release) {
-        // Android 8 이상은 "이 앱에서 설치 허용"을 한 번 켜 줘야 한다.
+        // Android 8 이상은 "이 앱에서 설치 허용"을 처음 한 번 켜 줘야 한다.
         if (Build.VERSION.SDK_INT >= 26 && !activity.packageManager.canRequestPackageInstalls()) {
-            Toast.makeText(
-                activity,
-                "'이 출처 허용'을 켜고 돌아오면 업데이트를 다시 물어볼게요.",
-                Toast.LENGTH_LONG
-            ).show()
-            activity.startActivity(
-                Intent(
-                    Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-                    Uri.parse("package:${activity.packageName}")
+            busy = false
+            if (activity.isFinishing) return
+            AlertDialog.Builder(activity)
+                .setTitle("새 버전이 있어요 (${release.name})")
+                .setMessage(
+                    "자동 업데이트를 하려면 처음 한 번만 '이 출처 허용'을 켜 주세요.\n\n" +
+                        "켠 다음 뒤로 돌아오면 알아서 업데이트해요."
                 )
-            )
+                .setPositiveButton("설정 열기") { _, _ ->
+                    activity.startActivity(
+                        Intent(
+                            Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                            Uri.parse("package:${activity.packageName}")
+                        )
+                    )
+                }
+                .setNegativeButton("나중에", null)
+                .show()
             return
         }
-        download(activity, release)
+
+        status(activity, "새 버전(${release.name}) 받는 중…")
+        val app = activity.applicationContext
+        Thread {
+            try {
+                val apk = download(release.apkUrl, File(app.cacheDir, "update.apk")) { percent ->
+                    status(activity, "새 버전(${release.name}) 받는 중… $percent%")
+                }
+                status(activity, "새 버전 설치 중…")
+                install(app, apk)
+            } catch (e: Exception) {
+                status(activity, "업데이트 받기 실패: 인터넷 연결을 확인하세요.")
+            } finally {
+                busy = false
+            }
+        }.start()
     }
 
-    private fun download(activity: Activity, release: Release) {
-        val app = activity.applicationContext
-        val dm = app.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+    private fun download(url: String, target: File, onProgress: (Int) -> Unit): File {
+        val conn = URL(url).openConnection() as HttpURLConnection
+        conn.connectTimeout = 15000
+        conn.readTimeout = 30000
+        conn.instanceFollowRedirects = true
+        try {
+            if (conn.responseCode != 200) throw IllegalStateException("HTTP ${conn.responseCode}")
+            val total = conn.contentLengthLong
+            var lastPercent = -1
+            target.delete()
+            conn.inputStream.use { input ->
+                target.outputStream().use { output ->
+                    val buffer = ByteArray(64 * 1024)
+                    var done = 0L
+                    while (true) {
+                        val n = input.read(buffer)
+                        if (n < 0) break
+                        output.write(buffer, 0, n)
+                        done += n
+                        if (total > 0) {
+                            val percent = (done * 100 / total).toInt()
+                            if (percent >= lastPercent + 5) { lastPercent = percent; onProgress(percent) }
+                        }
+                    }
+                }
+            }
+            return target
+        } finally {
+            conn.disconnect()
+        }
+    }
 
-        // 예전에 받아둔 파일이 있으면 지운다.
-        app.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
-            ?.resolve(APK_FILE_NAME)?.delete()
+    /** 안드로이드 설치기(PackageInstaller)로 설치한다. 조건이 맞으면 묻지 않고 설치된다. */
+    private fun install(context: Context, apk: File) {
+        val installer = context.packageManager.packageInstaller
+        val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL)
+        params.setAppPackageName(context.packageName)
+        if (Build.VERSION.SDK_INT >= 31) {
+            params.setRequireUserAction(PackageInstaller.SessionParams.USER_ACTION_NOT_REQUIRED)
+        }
+        val sessionId = installer.createSession(params)
+        installer.openSession(sessionId).use { session ->
+            apk.inputStream().use { input ->
+                session.openWrite("app.apk", 0, apk.length()).use { out ->
+                    input.copyTo(out)
+                    session.fsync(out)
+                }
+            }
+            val intent = Intent(context, InstallResultReceiver::class.java).setAction(ACTION_INSTALL_RESULT)
+            val flags = PendingIntent.FLAG_UPDATE_CURRENT or
+                (if (Build.VERSION.SDK_INT >= 31) PendingIntent.FLAG_MUTABLE else 0)
+            val pending = PendingIntent.getBroadcast(context, sessionId, intent, flags)
+            session.commit(pending.intentSender)
+        }
+    }
 
-        val request = DownloadManager.Request(Uri.parse(release.apkUrl))
-            .setTitle("조아저씨 실시간 통역 업데이트")
-            .setDescription(release.name)
-            .setMimeType("application/vnd.android.package-archive")
-            .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-            .setDestinationInExternalFilesDir(app, Environment.DIRECTORY_DOWNLOADS, APK_FILE_NAME)
-        val id = dm.enqueue(request)
-        Toast.makeText(activity, "새 버전을 받는 중이에요…", Toast.LENGTH_SHORT).show()
+    internal fun status(activity: Activity, text: String) {
+        activity.runOnUiThread { onStatus?.invoke(text) }
+    }
 
-        val receiver = object : BroadcastReceiver() {
-            override fun onReceive(context: Context, intent: Intent) {
-                if (intent.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1) != id) return
-                app.unregisterReceiver(this)
-                install(app, dm, id)
+    private fun toast(context: Context, text: String) {
+        Toast.makeText(context, text, Toast.LENGTH_SHORT).show()
+    }
+}
+
+/** 설치 결과를 받는 곳. 사용자 확인이 필요하면 안드로이드의 "업데이트할까요?" 화면을 띄운다. */
+class InstallResultReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        when (intent.getIntExtra(PackageInstaller.EXTRA_STATUS, PackageInstaller.STATUS_FAILURE)) {
+            PackageInstaller.STATUS_PENDING_USER_ACTION -> {
+                @Suppress("DEPRECATION")
+                val confirm = intent.getParcelableExtra<Intent>(Intent.EXTRA_INTENT) ?: return
+                confirm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                context.startActivity(confirm)
+            }
+            PackageInstaller.STATUS_SUCCESS -> Unit // 새 버전으로 바뀌면서 앱이 다시 시작된다
+            else -> {
+                val msg = intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE) ?: ""
+                Toast.makeText(context, "업데이트 설치 실패 $msg", Toast.LENGTH_LONG).show()
             }
         }
-        val filter = IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE)
-        if (Build.VERSION.SDK_INT >= 33) {
-            app.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED)
-        } else {
-            app.registerReceiver(receiver, filter)
-        }
-    }
-
-    private fun install(context: Context, dm: DownloadManager, id: Long) {
-        val uri: Uri? = if (Build.VERSION.SDK_INT >= 24) {
-            dm.getUriForDownloadedFile(id)
-        } else {
-            context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
-                ?.resolve(APK_FILE_NAME)?.let { Uri.fromFile(it) }
-        }
-        if (uri == null) {
-            Toast.makeText(context, "업데이트 파일을 받지 못했어요.", Toast.LENGTH_LONG).show()
-            return
-        }
-        val intent = Intent(Intent.ACTION_VIEW)
-            .setDataAndType(uri, "application/vnd.android.package-archive")
-            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        context.startActivity(intent)
     }
 }
