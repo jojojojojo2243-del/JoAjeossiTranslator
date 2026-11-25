@@ -34,30 +34,37 @@ import java.util.Locale
  * - 읽어 주는 동안은 마이크를 꺼 둔다 (읽는 소리를 다시 번역하지 않도록). 다 읽으면 다시 듣는다.
  * - [통역 종료]를 누르면 멈춘다.
  *
- * 언어 구분 방법 (추측이 섞여 있어 실제 휴대폰에서 확인 필요):
- *  1) 음성 인식에 두 언어를 모두 알려 준다 (Android 14 이상은 언어 자동 감지 옵션도 켬).
- *  2) 인식된 글자의 문자 종류(한글, 가나, 한자, 태국 문자, 로마자)로 먼저 구분한다.
- *  3) 문자 종류로 안 갈리면(예: 영어와 베트남어) ML Kit 언어 감지로 구분한다.
+ * Gemini 열쇠가 있으면 (권장):
+ *  마이크 소리를 한 마디씩 잘라 Gemini 에 보내서 "어느 언어인지 + 받아 적기 + 번역"을 받는다.
+ *  누가 어떤 언어로 말하든 알아서 구분된다. 차례도 버튼도 필요 없다. (GeminiInterpreter.kt)
+ *
+ * 열쇠가 없으면 차례 바꾸기:
+ *  휴대폰 음성 인식은 한 번에 한 언어로만 듣는다. 그래서 "누구 차례"인지 정해 두고 그 사람 언어로 듣는다.
+ *  - 내가 말해서 번역되면 → 다음은 상대방 차례(상대방 언어로 듣기)
+ *  - 상대방이 말해서 번역되면 → 다음은 내 차례(내 언어로 듣기)
+ *  - 상대방 차례인데 한동안 아무 말이 없으면 → 다시 내 차례
+ *  - 회색 상태 줄을 누르면 차례를 직접 바꿀 수 있다.
+ *  그래도 받아 적은 글자가 다른 사람 언어의 문자(한글/한자 등)면 그쪽으로 판단한다.
  */
 class MainActivity : Activity(), TextToSpeech.OnInitListener {
 
     /** 지원 언어. speechTag = 음성인식 언어, ttsLocale = 읽어 주기 언어, script = 문자 종류 */
     private data class Lang(
         val label: String, val code: String, val speechTag: String,
-        val ttsLocale: Locale, val script: Script
+        val ttsLocale: Locale, val script: Script, val englishName: String
     )
 
     private enum class Script { HANGUL, KANA, HAN, THAI, LATIN }
 
     private val languages = listOf(
-        Lang("한국어", TranslateLanguage.KOREAN, "ko-KR", Locale.KOREAN, Script.HANGUL),
-        Lang("영어", TranslateLanguage.ENGLISH, "en-US", Locale.US, Script.LATIN),
-        Lang("일본어", TranslateLanguage.JAPANESE, "ja-JP", Locale.JAPANESE, Script.KANA),
-        Lang("중국어", TranslateLanguage.CHINESE, "zh-CN", Locale.SIMPLIFIED_CHINESE, Script.HAN),
-        Lang("태국어", TranslateLanguage.THAI, "th-TH", Locale("th", "TH"), Script.THAI),
-        Lang("베트남어", TranslateLanguage.VIETNAMESE, "vi-VN", Locale("vi", "VN"), Script.LATIN),
+        Lang("한국어", TranslateLanguage.KOREAN, "ko-KR", Locale.KOREAN, Script.HANGUL, "Korean"),
+        Lang("영어", TranslateLanguage.ENGLISH, "en-US", Locale.US, Script.LATIN, "English"),
+        Lang("일본어", TranslateLanguage.JAPANESE, "ja-JP", Locale.JAPANESE, Script.KANA, "Japanese"),
+        Lang("중국어", TranslateLanguage.CHINESE, "zh-CN", Locale.SIMPLIFIED_CHINESE, Script.HAN, "Chinese (Simplified, Mandarin)"),
+        Lang("태국어", TranslateLanguage.THAI, "th-TH", Locale("th", "TH"), Script.THAI, "Thai"),
+        Lang("베트남어", TranslateLanguage.VIETNAMESE, "vi-VN", Locale("vi", "VN"), Script.LATIN, "Vietnamese"),
         // 필리핀어: ML Kit 번역은 타갈로그어(tl)로 지원. 음성인식/읽어 주기는 휴대폰에 따라 안 될 수 있음
-        Lang("필리핀어(타갈로그)", TranslateLanguage.TAGALOG, "fil-PH", Locale("fil", "PH"), Script.LATIN)
+        Lang("필리핀어(타갈로그)", TranslateLanguage.TAGALOG, "fil-PH", Locale("fil", "PH"), Script.LATIN, "Filipino (Tagalog)")
     )
 
     private enum class Speaker { ME, OTHER }
@@ -90,6 +97,18 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private var speaking = false
     /** Android 14 이상에서 음성 인식이 알려 준 언어 (예: "en-US") */
     private var detectedTag: String? = null
+    /** 지금 누구 말을 듣는 차례인지 (그 사람 언어로 음성 인식) */
+    private var turn = Speaker.ME
+    /** 상대방 차례에서 말 없이 지나간 횟수 */
+    private var silentCount = 0
+
+    /** Gemini 로 자동 언어 구분 (열쇠가 있을 때만) */
+    private var gemini: GeminiInterpreter? = null
+    private val prefs by lazy { getSharedPreferences("settings", MODE_PRIVATE) }
+    private fun geminiKey(): String = prefs.getString(KEY_GEMINI, "")?.trim() ?: ""
+    private val useGemini get() = geminiKey().isNotEmpty()
+
+    private fun langOf(who: Speaker) = if (who == Speaker.ME) myLang else otherLang
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -130,15 +149,75 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             gravity = Gravity.END; setPadding(dp(8), 0, dp(8), 0)
         }
         AppUpdater.onStatus = { msg -> updateStatus.text = msg }
+        val keyButton = TextView(this).apply {
+            text = "🔑 열쇠"
+            textSize = 13f; setTextColor(blue)
+            background = rounded(0xFFFFFFFF.toInt(), 6, blue)
+            setPadding(dp(10), dp(4), dp(10), dp(4))
+            setOnClickListener { showKeyDialog() }
+        }
         return LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
             addView(versionText, LinearLayout.LayoutParams(-2, -2))
             addView(updateStatus, LinearLayout.LayoutParams(0, -2, 1f))
+            addView(keyButton, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(6) })
             addView(checkButton, LinearLayout.LayoutParams(-2, -2))
         }
     }
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+
+    /** 🔑 열쇠 창: Gemini 열쇠를 붙여 넣고 저장 (이 휴대폰에만 저장) */
+    private fun showKeyDialog() {
+        val input = EditText(this).apply {
+            hint = "AIza... 여기에 붙여 넣기"
+            setText(geminiKey())
+            isSingleLine = true
+            textSize = 15f
+        }
+        val getKey = TextView(this).apply {
+            text = "① 열쇠 받으러 가기 (구글 사이트 열기)"
+            textSize = 15f; setTextColor(blue)
+            paintFlags = paintFlags or android.graphics.Paint.UNDERLINE_TEXT_FLAG
+            setPadding(0, dp(10), 0, dp(6))
+            setOnClickListener {
+                try { startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(KEY_PAGE_URL))) } catch (_: Exception) {}
+            }
+        }
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(22), dp(4), dp(22), 0)
+            addView(TextView(this@MainActivity).apply {
+                text = "열쇠를 넣으면 누가 어떤 말로 하든\n언어를 알아서 구분해요. (인터넷 필요)"
+                textSize = 14f; setTextColor(0xFF555555.toInt())
+            })
+            addView(getKey)
+            addView(TextView(this@MainActivity).apply {
+                text = "② 받은 열쇠를 복사해서 아래에 붙여 넣으세요"
+                textSize = 14f; setTextColor(0xFF555555.toInt())
+            })
+            addView(input)
+            addView(TextView(this@MainActivity).apply {
+                text = "열쇠는 이 휴대폰에만 저장돼요.\n열쇠가 없으면 휴대폰 음성 인식(차례 바꾸기)을 써요."
+                textSize = 12f; setTextColor(0xFF888888.toInt())
+                setPadding(0, dp(6), 0, 0)
+            })
+        }
+        android.app.AlertDialog.Builder(this)
+            .setTitle("🔑 Gemini 열쇠 넣기")
+            .setView(box)
+            .setNegativeButton("취소", null)
+            .setPositiveButton("저장") { _, _ ->
+                val key = input.text.toString().trim().replace("\\s".toRegex(), "")
+                prefs.edit().putString(KEY_GEMINI, key).apply()
+                val wasRunning = running
+                if (wasRunning) stopInterpreting("")
+                status.text = if (key.isEmpty()) "열쇠를 지웠어요. 휴대폰 음성 인식을 써요."
+                    else "열쇠를 저장했어요. 🌐 인터넷 자동 언어 구분 켜짐"
+                if (wasRunning) startInterpreting()
+            }
+            .show()
+    }
 
     private fun rounded(color: Int, radiusDp: Int, strokeColor: Int? = null) = GradientDrawable().apply {
         setColor(color); cornerRadius = dp(radiusDp).toFloat()
@@ -186,6 +265,8 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             textSize = 15f; gravity = Gravity.CENTER; setTextColor(0xFF444444.toInt())
             background = rounded(0xFFE3E9F7.toInt(), 8)
             setPadding(dp(8), dp(8), dp(8), dp(8))
+            // 누르면 차례 바꾸기 (나 ↔ 상대방)
+            setOnClickListener { switchTurn() }
         }
 
         // 대화 카드가 쌓이는 곳
@@ -342,13 +423,16 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         if (myLang.code == otherLang.code) { status.text = "나와 상대방의 언어를 다르게 골라 주세요."; return }
         running = true
         speaking = false
+        turn = Speaker.ME
+        silentCount = 0
         updateButtons()
-        listenOnce()
+        if (useGemini) startGemini() else listenOnce()
     }
 
     private fun stopInterpreting(message: String) {
         running = false
         speaking = false
+        gemini?.stop(); gemini = null
         speech?.cancel()
         if (ttsReady) tts.stop()
         updateButtons()
@@ -357,28 +441,98 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
 
     // ───────────────────────── 듣기 ─────────────────────────
 
+    // ───────────────────────── Gemini 자동 언어 구분 ─────────────────────────
+
+    private fun geminiListeningText() = "🔴 듣는 중… 아무나 말하면 언어를 알아서 구분해요\n🌐 인터넷 자동 언어 구분 켜짐"
+
+    private fun startGemini() {
+        speech?.cancel()
+        val g = GeminiInterpreter(
+            apiKey = geminiKey(),
+            onUtterance = { wav -> runOnUiThread { if (running) status.text = "번역 중..." }; handleGeminiAudio(wav) },
+            onSpeechStart = { runOnUiThread { if (running && !speaking) status.text = "🔴 듣는 중… (말하는 중)" } },
+            onMicError = { runOnUiThread { stopInterpreting("마이크를 쓸 수 없어요. 다른 앱이 마이크를 쓰고 있는지 확인해 주세요.") } }
+        )
+        gemini = g
+        status.text = geminiListeningText()
+        g.start()
+    }
+
+    /** 백그라운드 스레드에서 불린다 */
+    private fun handleGeminiAudio(wav: ByteArray) {
+        val g = gemini ?: return
+        val a = myLang; val b = otherLang
+        val result = try {
+            g.recognize(wav, a.code, a.englishName, b.code, b.englishName)
+        } catch (e: GeminiInterpreter.HttpError) {
+            val msg = when (e.code) {
+                400, 401, 403 -> if (e.body.contains("API key", true) || e.body.contains("API_KEY", true))
+                    "열쇠가 맞지 않아요. [🔑 열쇠]를 눌러 다시 넣어 주세요." else "Gemini 오류(${e.code}). 잠시 후 다시 말해 주세요."
+                429 -> "무료 사용량을 잠깐 넘었어요. 1분쯤 뒤에 다시 말해 주세요."
+                else -> "Gemini 오류(${e.code}). 잠시 후 다시 말해 주세요."
+            }
+            runOnUiThread { if (running) { status.text = msg; status.postDelayed({ listenOnce() }, 2500) } }
+            return
+        } catch (_: Exception) {
+            runOnUiThread { if (running) { status.text = "인터넷 연결을 확인해 주세요."; status.postDelayed({ listenOnce() }, 2500) } }
+            return
+        }
+        runOnUiThread {
+            if (!running || myLang !== a || otherLang !== b) { listenOnce(); return@runOnUiThread }
+            val who = when (result.lang.substringBefore('-')) {
+                a.code -> Speaker.ME
+                b.code -> Speaker.OTHER
+                else -> null
+            }
+            if (who == null || result.text.isBlank()) { listenOnce(); return@runOnUiThread }
+            val from = if (who == Speaker.ME) a else b
+            val to = if (who == Speaker.ME) b else a
+            if (result.translation.isNotBlank()) {
+                addCard(who, from, to, result.text, result.translation)
+                speak(result.translation, to)
+            } else {
+                translate(who, result.text)   // 번역이 비어 있으면 휴대폰 번역기로
+            }
+        }
+    }
+
+    private fun turnText() =
+        if (turn == Speaker.ME) "🔵 나(${myLang.label}) 차례 · 말씀하세요\n(이 줄을 누르면 상대방 차례로 바뀌어요)"
+        else "🟢 상대방(${otherLang.label}) 차례 · 듣는 중\n(이 줄을 누르면 내 차례로 바뀌어요)"
+
+    /** 회색 줄을 누르면 차례를 바꾸고 바로 그 언어로 다시 듣는다 */
+    private fun switchTurn() {
+        turn = if (turn == Speaker.ME) Speaker.OTHER else Speaker.ME
+        silentCount = 0
+        if (!running) { status.text = "${if (turn == Speaker.ME) "나" else "상대방"} 차례부터 시작해요. [동시 통역 시작]을 누르세요."; return }
+        if (speaking) return
+        speech?.cancel()
+        listenOnce()
+    }
+
     private fun listenOnce() {
         if (!running || speaking) return
+        gemini?.let {
+            // Gemini 모드: 마이크를 다시 켠다 (계속 녹음 중이고, 멈춤만 푼다)
+            status.text = geminiListeningText()
+            it.paused = false
+            return
+        }
         val recognizer = speech ?: return
         detectedTag = null
+        val listenLang = langOf(turn)
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, myLang.speechTag)
+            // 지금 차례인 사람의 언어로 듣는다 (휴대폰 음성 인식은 한 번에 한 언어만 제대로 알아듣는다)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, listenLang.speechTag)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, listenLang.speechTag)
+            putExtra(RecognizerIntent.EXTRA_ONLY_RETURN_LANGUAGE_PREFERENCE, true)
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
-            // 구글 음성 인식에 "상대방 언어도 들릴 수 있다"고 알려 준다 (공식 문서에 없는 옵션이라 추측)
-            putExtra("android.speech.extra.EXTRA_ADDITIONAL_LANGUAGES", arrayOf(otherLang.speechTag))
-            if (Build.VERSION.SDK_INT >= 34) {
-                val both = arrayListOf(myLang.speechTag, otherLang.speechTag)
-                putExtra(RecognizerIntent.EXTRA_ENABLE_LANGUAGE_DETECTION, true)
-                putStringArrayListExtra(RecognizerIntent.EXTRA_LANGUAGE_DETECTION_ALLOWED_LANGUAGES, both)
-                putExtra(RecognizerIntent.EXTRA_ENABLE_LANGUAGE_SWITCH, RecognizerIntent.LANGUAGE_SWITCH_BALANCED)
-                putStringArrayListExtra(RecognizerIntent.EXTRA_LANGUAGE_SWITCH_ALLOWED_LANGUAGES, both)
-            }
         }
         try {
             recognizer.startListening(intent)
-            status.text = "🔴 듣는 중… 아무나 말하면 언어를 알아서 구분해요"
+            status.text = turnText()
         } catch (_: Exception) {
             stopInterpreting("음성인식을 시작하지 못했습니다.")
         }
@@ -404,8 +558,16 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                     stopInterpreting("마이크 권한을 허용해 주세요."); requestAudioPermission()
                 }
                 SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED, SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE ->
-                    stopInterpreting("이 휴대폰은 ${myLang.label} 음성인식을 지원하지 않습니다.")
-                // 말이 없거나 못 알아들은 경우 등은 조용히 다시 듣는다
+                    stopInterpreting("이 휴대폰은 ${langOf(turn).label} 음성인식을 지원하지 않습니다. " +
+                        "설정 > 일반 > 음성 입력에서 ${langOf(turn).label}를 추가해 주세요.")
+                SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> {
+                    // 상대방 차례인데 한동안 아무 말이 없으면 다시 내 차례로
+                    if (turn == Speaker.OTHER && ++silentCount >= SILENT_LIMIT) {
+                        turn = Speaker.ME; silentCount = 0
+                    }
+                    status.postDelayed({ listenOnce() }, 300)
+                }
+                // 그 밖의 경우는 조용히 다시 듣는다
                 else -> status.postDelayed({ listenOnce() }, 300)
             }
         }
@@ -413,7 +575,12 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
             if (!running) return
             if (text.isNullOrBlank()) { status.postDelayed({ listenOnce() }, 300); return }
-            decideSpeaker(text) { who -> translate(who, text) }
+            silentCount = 0
+            decideSpeaker(text) { who ->
+                // 한 사람이 말하고 나면 다음은 다른 사람 차례
+                turn = if (who == Speaker.ME) Speaker.OTHER else Speaker.ME
+                translate(who, text)
+            }
         }
         override fun onPartialResults(partialResults: Bundle?) {
             val text = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
@@ -429,6 +596,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     // ───────────────────────── 누가 말했는지 구분 ─────────────────────────
 
     private fun decideSpeaker(text: String, done: (Speaker) -> Unit) {
+        // 기본은 "지금 차례인 사람". 받아 적은 글자가 분명히 다른 쪽이면 그쪽으로.
         // 1) Android 14 이상: 음성 인식이 알려 준 언어
         detectedTag?.let { tag ->
             val prefix = tag.substringBefore('-').lowercase()
@@ -436,13 +604,13 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             if (prefix == myLang.speechTag.substringBefore('-')) { done(Speaker.ME); return }
         }
         // 2) 문자 종류로 구분 (한글/가나/한자/태국 문자/로마자)
-        scriptGuess(text)?.let { done(it); return }
-        // 3) 둘 다 로마자 언어 등: ML Kit 언어 감지
+        if (myLang.script != otherLang.script) { done(scriptGuess(text) ?: turn); return }
+        // 3) 둘 다 로마자 언어 등: ML Kit 언어 감지, 모르면 차례대로
         languageId.identifyLanguage(text)
             .addOnSuccessListener { code ->
-                done(if (code == otherLang.code) Speaker.OTHER else Speaker.ME)
+                done(when (code) { otherLang.code -> Speaker.OTHER; myLang.code -> Speaker.ME; else -> turn })
             }
-            .addOnFailureListener { done(Speaker.ME) }
+            .addOnFailureListener { done(turn) }
     }
 
     private fun scriptOf(c: Char): Script? = when {
@@ -497,6 +665,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             resumeListening(800); return
         }
         speaking = true
+        gemini?.paused = true
         speech?.cancel()
         status.text = "🔈 읽는 중... (마이크 꺼짐)"
         if (tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, UTTERANCE_ID) == TextToSpeech.ERROR) resumeListening(300)
@@ -522,6 +691,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
 
     override fun onDestroy() {
         running = false
+        gemini?.stop()
         speech?.destroy()
         if (::tts.isInitialized) tts.shutdown()
         meToOther?.close(); otherToMe?.close()
@@ -533,5 +703,9 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         private const val UTTERANCE_ID = "translated"
         /** 다 읽은 뒤 스피커 잔향이 잡히지 않도록 잠깐 기다렸다가 다시 듣는다 */
         private const val RESUME_DELAY_MS = 400L
+        /** 상대방 차례에서 이만큼(약 5초씩) 조용하면 다시 내 차례로 */
+        private const val SILENT_LIMIT = 3
+        private const val KEY_GEMINI = "gemini_api_key"
+        private const val KEY_PAGE_URL = "https://aistudio.google.com/apikey"
     }
 }
