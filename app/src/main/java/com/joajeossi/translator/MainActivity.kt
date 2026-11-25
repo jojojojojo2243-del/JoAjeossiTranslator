@@ -11,7 +11,9 @@ import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.view.Gravity
+import android.os.Build
 import android.view.View
+import android.view.WindowInsets
 import android.widget.*
 import com.google.mlkit.common.model.DownloadConditions
 import com.google.mlkit.nl.translate.TranslateLanguage
@@ -122,10 +124,31 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         root.addView(status, LinearLayout.LayoutParams(-1, -2))
         root.addView(me.panel, LinearLayout.LayoutParams(-1, 0, 1f))
         setContentView(root)
+        keepClearOfSystemBars(root)
 
         me.button.setOnClickListener { onSpeakPressed(Speaker.ME) }
         other.button.setOnClickListener { onSpeakPressed(Speaker.OTHER) }
         updateButtons()
+    }
+
+    /**
+     * Android 15(targetSdk 35)부터는 앱 화면이 상태바/내비게이션바 밑까지 그려진다.
+     * 그래서 위쪽 상대방 버튼이 상태바에, 아래쪽 내 버튼이 내비게이션바에 가렸다.
+     * 시스템 바와 노치 크기만큼 안쪽 여백을 줘서 버튼이 다 보이게 한다.
+     */
+    private fun keepClearOfSystemBars(view: View) {
+        view.setOnApplyWindowInsetsListener { v, insets ->
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                val bars = insets.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
+                v.setPadding(bars.left, bars.top, bars.right, bars.bottom)
+            } else {
+                @Suppress("DEPRECATION")
+                v.setPadding(insets.systemWindowInsetLeft, insets.systemWindowInsetTop,
+                    insets.systemWindowInsetRight, insets.systemWindowInsetBottom)
+            }
+            insets
+        }
+        view.requestApplyInsets()
     }
 
     private fun buildSide(
