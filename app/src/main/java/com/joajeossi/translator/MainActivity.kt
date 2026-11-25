@@ -126,6 +126,9 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         me.button.setOnClickListener { onSpeakPressed(Speaker.ME) }
         other.button.setOnClickListener { onSpeakPressed(Speaker.OTHER) }
         updateButtons()
+
+        // GitHub에 새 버전이 올라와 있으면 업데이트를 물어본다
+        AppUpdater.checkForUpdate(this)
     }
 
     private fun buildSide(
