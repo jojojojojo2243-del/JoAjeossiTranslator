@@ -9,6 +9,7 @@ import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
 import android.view.Gravity
 import android.view.View
 import android.widget.*
@@ -28,6 +29,8 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private lateinit var tts: TextToSpeech
     private var translator: Translator? = null
     private var listening = false
+    // TTS가 번역문을 읽는 동안 true. 이때는 마이크(음성 인식)를 꺼 둔다.
+    private var speaking = false
     private var sourceCode = TranslateLanguage.ENGLISH
     private var targetCode = TranslateLanguage.KOREAN
     private var sourceLocale = "en-US"
@@ -162,7 +165,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     }
 
     private fun listenOnce() {
-        if (!listening) return
+        if (!listening || speaking) return
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, sourceLocale)
@@ -181,12 +184,17 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         override fun onBufferReceived(buffer: ByteArray?) {}
         override fun onEndOfSpeech() { status.text = "번역 중..." }
         override fun onError(error: Int) {
-            if (listening) sourceText.postDelayed({ listenOnce() }, 350)
+            // 통역문을 읽는 중에는 재시작하지 않는다. 읽기가 끝나면 resumeListening()이 다시 켠다.
+            if (listening && !speaking) sourceText.postDelayed({ listenOnce() }, 350)
         }
         override fun onResults(results: Bundle?) {
             val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
-            if (!text.isNullOrBlank()) translate(text)
-            if (listening) sourceText.postDelayed({ listenOnce() }, 300)
+            if (!text.isNullOrBlank()) {
+                // 번역 → 읽기 → 읽기 끝난 뒤 다시 듣기. 여기서 바로 재시작하지 않는다.
+                translate(text)
+            } else if (listening) {
+                sourceText.postDelayed({ listenOnce() }, 300)
+            }
         }
         override fun onPartialResults(partialResults: Bundle?) {
             val text = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
@@ -198,25 +206,66 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private fun translate(text: String) {
         sourceText.text = text
         val active = translator
-        if (active == null) { translatedText.text = "번역기를 준비하고 있습니다."; return }
+        if (active == null) {
+            translatedText.text = "번역기를 준비하고 있습니다."
+            resumeListening(300); return
+        }
         active.translate(text).addOnSuccessListener { result ->
             translatedText.text = result
-            tts.language = targetLocale
-            tts.speak(result, TextToSpeech.QUEUE_FLUSH, null, "translated")
+            speakTranslation(result)
         }.addOnFailureListener {
             translatedText.text = "번역에 실패했습니다. 인터넷 연결을 확인해 주세요."
+            resumeListening(300)
+        }
+    }
+
+    /** 마이크를 끄고 번역문을 읽는다. 다 읽으면 UtteranceProgressListener가 마이크를 다시 켠다. */
+    private fun speakTranslation(result: String) {
+        if (!listening) return
+        speaking = true
+        if (::speech.isInitialized) speech.cancel()
+        status.text = "🔈 통역 읽는 중... (마이크 꺼짐)"
+        tts.language = targetLocale
+        val r = tts.speak(result, TextToSpeech.QUEUE_FLUSH, null, UTTERANCE_ID)
+        if (r == TextToSpeech.ERROR) resumeListening(300)
+    }
+
+    /** 읽기가 끝나면 스피커 잔향이 잡히지 않도록 잠깐 기다린 뒤 다시 듣는다. */
+    private fun resumeListening(delayMs: Long) {
+        runOnUiThread {
+            speaking = false
+            if (listening) {
+                status.text = "음성을 듣고 있습니다..."
+                sourceText.postDelayed({ listenOnce() }, delayMs)
+            }
         }
     }
 
     private fun stopListening() {
         listening = false
+        speaking = false
         if (::speech.isInitialized) speech.stopListening()
+        if (::tts.isInitialized) tts.stop()
         startButton.text = "🎙 통역 시작"
         status.text = "통역이 중지되었습니다."
     }
 
     override fun onInit(statusCode: Int) {
-        if (statusCode == TextToSpeech.SUCCESS) tts.language = Locale.KOREAN
+        if (statusCode != TextToSpeech.SUCCESS) return
+        tts.language = Locale.KOREAN
+        tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+            override fun onStart(utteranceId: String?) {}
+            override fun onDone(utteranceId: String?) {
+                if (utteranceId == UTTERANCE_ID) resumeListening(RESUME_DELAY_MS)
+            }
+            @Deprecated("Deprecated in Java")
+            override fun onError(utteranceId: String?) {
+                if (utteranceId == UTTERANCE_ID) resumeListening(RESUME_DELAY_MS)
+            }
+            override fun onStop(utteranceId: String?, interrupted: Boolean) {
+                if (utteranceId == UTTERANCE_ID) resumeListening(RESUME_DELAY_MS)
+            }
+        })
     }
 
     override fun onDestroy() {
@@ -225,5 +274,10 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         if (::tts.isInitialized) tts.shutdown()
         translator?.close()
         super.onDestroy()
+    }
+
+    companion object {
+        private const val UTTERANCE_ID = "translated"
+        private const val RESUME_DELAY_MS = 400L
     }
 }
