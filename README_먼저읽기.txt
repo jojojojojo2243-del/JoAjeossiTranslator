@@ -16,11 +16,12 @@ GitHub에 올리는 방법
 4. 특히 .github 폴더가 빠지지 않도록 확인
 5. 업로드 후 GitHub 저장소의 Actions에서 Android APK Build 실행 결과 확인
 
-APK 받는 방법
-1. GitHub 저장소에서 Actions 선택
-2. 가장 최근 Android APK Build 실행 항목 선택
-3. 성공(초록색 체크)이면 아래 Artifacts에서 JoAjeossiTranslator-debug-apk 다운로드
-4. ZIP을 풀면 app-debug.apk가 있습니다.
+APK 받는 방법 / 자동 업데이트
+1. main 에 올라갈 때마다 Actions가 APK를 만들어 GitHub Releases 에 자동으로 올립니다.
+2. 처음 한 번은 GitHub 저장소 오른쪽 Releases > 최신 버전의 .apk 를 휴대폰에서 받아 설치합니다.
+3. 그 다음부터는 앱을 켤 때 새 버전이 있으면 "새 버전이 있어요" 창이 뜨고, [업데이트]를 누르면 설치됩니다.
+4. 서명 열쇠 4개(SIGNING_...)가 저장소 Settings > Secrets and variables > Actions 에 있어야 합니다.
+   열쇠가 바뀌면 덮어쓰기 설치가 안 되니 같은 열쇠를 계속 써야 합니다.
 
 참고
 - 이 ZIP은 설치용 APK가 아니라 Android 프로젝트 전체입니다.
