@@ -4,6 +4,9 @@ import android.Manifest
 import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
+import android.os.Build
 import android.os.Bundle
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
@@ -11,11 +14,11 @@ import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.view.Gravity
-import android.os.Build
 import android.view.View
 import android.view.WindowInsets
 import android.widget.*
 import com.google.mlkit.common.model.DownloadConditions
+import com.google.mlkit.nl.languageid.LanguageIdentification
 import com.google.mlkit.nl.translate.TranslateLanguage
 import com.google.mlkit.nl.translate.Translation
 import com.google.mlkit.nl.translate.Translator
@@ -23,55 +26,70 @@ import com.google.mlkit.nl.translate.TranslatorOptions
 import java.util.Locale
 
 /**
- * 양방향 통역 화면 (1차 버전)
+ * 한 화면 동시 통역
  *
- * - 화면 위쪽 절반: 상대방용 (180도 돌려 놓아서 마주 앉은 상대가 바로 읽을 수 있음)
- * - 화면 아래쪽 절반: 나용
- * - 각자 자기 쪽 버튼을 누르고 한 문장 말하면 → 번역 → 상대 쪽 화면에 크게 표시 + 상대 언어로 읽어 줌
- * - 번역기는 방향마다 따로 둠 (나→상대, 상대→나)
- * - 버튼을 한 번 누르면 한 문장만 듣고 멈춤. 그래서 읽어 주는 소리를 다시 번역하는 일이 없음
+ * - 위에서 "나" 언어와 "상대방" 언어를 고른다.
+ * - [동시 통역 시작]을 누르면 계속 듣는다. 누가 말하든 두 언어 중 어느 쪽인지 알아서 구분해서
+ *   반대 언어로 번역하고, 대화 카드로 쌓고, 소리로 읽어 준다.
+ * - 읽어 주는 동안은 마이크를 꺼 둔다 (읽는 소리를 다시 번역하지 않도록). 다 읽으면 다시 듣는다.
+ * - [통역 종료]를 누르면 멈춘다.
+ *
+ * 언어 구분 방법 (추측이 섞여 있어 실제 휴대폰에서 확인 필요):
+ *  1) 음성 인식에 두 언어를 모두 알려 준다 (Android 14 이상은 언어 자동 감지 옵션도 켬).
+ *  2) 인식된 글자의 문자 종류(한글, 가나, 한자, 태국 문자, 로마자)로 먼저 구분한다.
+ *  3) 문자 종류로 안 갈리면(예: 영어와 베트남어) ML Kit 언어 감지로 구분한다.
  */
 class MainActivity : Activity(), TextToSpeech.OnInitListener {
 
-    /** 지원 언어. speechTag = 음성인식 언어, ttsLocale = 읽어 주기 언어 */
-    private data class Lang(val label: String, val code: String, val speechTag: String, val ttsLocale: Locale)
+    /** 지원 언어. speechTag = 음성인식 언어, ttsLocale = 읽어 주기 언어, script = 문자 종류 */
+    private data class Lang(
+        val label: String, val code: String, val speechTag: String,
+        val ttsLocale: Locale, val script: Script
+    )
+
+    private enum class Script { HANGUL, KANA, HAN, THAI, LATIN }
 
     private val languages = listOf(
-        Lang("한국어", TranslateLanguage.KOREAN, "ko-KR", Locale.KOREAN),
-        Lang("영어", TranslateLanguage.ENGLISH, "en-US", Locale.US),
-        Lang("일본어", TranslateLanguage.JAPANESE, "ja-JP", Locale.JAPANESE),
-        Lang("중국어", TranslateLanguage.CHINESE, "zh-CN", Locale.SIMPLIFIED_CHINESE),
-        Lang("태국어", TranslateLanguage.THAI, "th-TH", Locale("th", "TH")),
-        Lang("베트남어", TranslateLanguage.VIETNAMESE, "vi-VN", Locale("vi", "VN")),
+        Lang("한국어", TranslateLanguage.KOREAN, "ko-KR", Locale.KOREAN, Script.HANGUL),
+        Lang("영어", TranslateLanguage.ENGLISH, "en-US", Locale.US, Script.LATIN),
+        Lang("일본어", TranslateLanguage.JAPANESE, "ja-JP", Locale.JAPANESE, Script.KANA),
+        Lang("중국어", TranslateLanguage.CHINESE, "zh-CN", Locale.SIMPLIFIED_CHINESE, Script.HAN),
+        Lang("태국어", TranslateLanguage.THAI, "th-TH", Locale("th", "TH"), Script.THAI),
+        Lang("베트남어", TranslateLanguage.VIETNAMESE, "vi-VN", Locale("vi", "VN"), Script.LATIN),
         // 필리핀어: ML Kit 번역은 타갈로그어(tl)로 지원. 음성인식/읽어 주기는 휴대폰에 따라 안 될 수 있음
-        Lang("필리핀어(타갈로그)", TranslateLanguage.TAGALOG, "fil-PH", Locale("fil", "PH"))
+        Lang("필리핀어(타갈로그)", TranslateLanguage.TAGALOG, "fil-PH", Locale("fil", "PH"), Script.LATIN)
     )
 
     private enum class Speaker { ME, OTHER }
 
-    private class Side(
-        val panel: LinearLayout,
-        val sourceText: TextView,
-        val translatedText: TextView,
-        val button: Button
-    )
+    private val blue = 0xFF1453B8.toInt()
+    private val green = 0xFF0F7B5F.toInt()
+    private val red = 0xFFC62828.toInt()
 
-    private lateinit var me: Side
-    private lateinit var other: Side
     private lateinit var status: TextView
+    private lateinit var log: LinearLayout
+    private lateinit var logScroll: ScrollView
+    private lateinit var startButton: Button
+    private lateinit var stopButton: Button
+    private lateinit var mySpinner: Spinner
+    private lateinit var otherSpinner: Spinner
 
     private var speech: SpeechRecognizer? = null
     private lateinit var tts: TextToSpeech
     private var ttsReady = false
+    private val languageId = LanguageIdentification.getClient()
 
     private var myLang = languages[0]      // 기본: 나 = 한국어
     private var otherLang = languages[1]   // 기본: 상대 = 영어
-
     private var meToOther: Translator? = null
     private var otherToMe: Translator? = null
 
-    /** 지금 듣고 있는 사람 (null 이면 아무도 안 듣는 중) */
-    private var activeSpeaker: Speaker? = null
+    /** 동시 통역이 켜져 있는지 */
+    private var running = false
+    /** 번역문을 읽는 중인지 (이때는 마이크 꺼 둠) */
+    private var speaking = false
+    /** Android 14 이상에서 음성 인식이 알려 준 언어 (예: "en-US") */
+    private var detectedTag: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -84,60 +102,120 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         }
         requestAudioPermission()
         configureTranslators()
+
+        // GitHub에 새 버전이 올라와 있으면 업데이트를 물어본다
+        AppUpdater.checkForUpdate(this)
     }
 
     // ───────────────────────── 화면 ─────────────────────────
+
+    private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+
+    private fun rounded(color: Int, radiusDp: Int, strokeColor: Int? = null) = GradientDrawable().apply {
+        setColor(color); cornerRadius = dp(radiusDp).toFloat()
+        if (strokeColor != null) setStroke(dp(1), strokeColor)
+    }
 
     private fun buildScreen() {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(0xFFF4F7FF.toInt())
         }
-        status = TextView(this).apply {
-            text = "통역 준비 중..."
-            textSize = 14f; gravity = Gravity.CENTER
-            setTextColor(0xFF555555.toInt())
-            setBackgroundColor(0xFFE3E9F7.toInt())
-            setPadding(8, 12, 8, 12)
+        val inner = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(14), dp(6), dp(14), dp(8))
         }
 
-        other = buildSide(
-            title = "상대방",
-            sourceHint = "상대방이 한 말",
-            translatedHint = "제 말의 번역이 여기에 보입니다",
-            color = 0xFF0F7B5F.toInt(),
-            initialLang = 1
-        ) { pos -> otherLang = languages[pos]; configureTranslators() }
+        val title = TextView(this).apply {
+            text = "🌱 조아저씨 동시 통역"
+            textSize = 21f; gravity = Gravity.CENTER; setTextColor(blue)
+            setTypeface(typeface, Typeface.BOLD)
+            setPadding(0, dp(4), 0, dp(10))
+        }
 
-        me = buildSide(
-            title = "나",
-            sourceHint = "내가 한 말",
-            translatedHint = "상대방 말의 번역이 여기에 보입니다",
-            color = 0xFF1453B8.toInt(),
-            initialLang = 0
-        ) { pos -> myLang = languages[pos]; configureTranslators() }
+        // 언어 고르기: [나 ▾]  ⇄  [상대방 ▾]
+        mySpinner = languageSpinner(0) { pos -> myLang = languages[pos]; configureTranslators() }
+        otherSpinner = languageSpinner(1) { pos -> otherLang = languages[pos]; configureTranslators() }
+        val swap = TextView(this).apply {
+            text = "⇄"; textSize = 24f; setTextColor(blue); gravity = Gravity.CENTER
+            setPadding(dp(8), 0, dp(8), 0)
+            setOnClickListener {
+                val m = mySpinner.selectedItemPosition
+                mySpinner.setSelection(otherSpinner.selectedItemPosition)
+                otherSpinner.setSelection(m)
+            }
+        }
+        val langRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            addView(languageBox("나", mySpinner), LinearLayout.LayoutParams(0, -2, 1f))
+            addView(swap, LinearLayout.LayoutParams(-2, -2))
+            addView(languageBox("상대방", otherSpinner), LinearLayout.LayoutParams(0, -2, 1f))
+        }
 
-        // 상대방 쪽 절반은 180도 돌려서 마주 앉은 사람이 읽기 쉽게
-        other.panel.rotation = 180f
+        status = TextView(this).apply {
+            text = "통역 준비 중..."
+            textSize = 15f; gravity = Gravity.CENTER; setTextColor(0xFF444444.toInt())
+            background = rounded(0xFFE3E9F7.toInt(), 8)
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+        }
 
-        root.addView(other.panel, LinearLayout.LayoutParams(-1, 0, 1f))
-        root.addView(status, LinearLayout.LayoutParams(-1, -2))
-        root.addView(me.panel, LinearLayout.LayoutParams(-1, 0, 1f))
+        // 대화 카드가 쌓이는 곳
+        log = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        log.addView(TextView(this).apply {
+            text = "아래 [동시 통역 시작]을 누르고 말씀하세요.\n나와 상대방 누가 말해도 알아서 번역합니다."
+            textSize = 15f; setTextColor(0xFF888888.toInt()); gravity = Gravity.CENTER
+            setPadding(0, dp(24), 0, 0)
+            tag = "hint"
+        })
+        logScroll = ScrollView(this).apply { addView(log) }
+
+        startButton = bigButton("🎙 동시 통역 시작", blue) { startInterpreting() }
+        stopButton = bigButton("■ 통역 종료", red) { stopInterpreting("통역을 종료했습니다.") }
+        val buttonRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(startButton, LinearLayout.LayoutParams(0, -2, 1f).apply { rightMargin = dp(5) })
+            addView(stopButton, LinearLayout.LayoutParams(0, -2, 1f).apply { leftMargin = dp(5) })
+        }
+
+        inner.addView(title)
+        inner.addView(langRow)
+        inner.addView(status, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(10) })
+        inner.addView(logScroll, LinearLayout.LayoutParams(-1, 0, 1f).apply { topMargin = dp(8) })
+        inner.addView(buttonRow, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(10) })
+        root.addView(inner, LinearLayout.LayoutParams(-1, -1))
         setContentView(root)
         keepClearOfSystemBars(root)
-
-        me.button.setOnClickListener { onSpeakPressed(Speaker.ME) }
-        other.button.setOnClickListener { onSpeakPressed(Speaker.OTHER) }
         updateButtons()
+    }
 
-        // GitHub에 새 버전이 올라와 있으면 업데이트를 물어본다
-        AppUpdater.checkForUpdate(this)
+    private fun languageSpinner(initial: Int, onChanged: (Int) -> Unit) = Spinner(this).apply {
+        adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, languages.map { it.label })
+        setSelection(initial)
+        onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onNothingSelected(p0: AdapterView<*>?) {}
+            override fun onItemSelected(p0: AdapterView<*>?, v: View?, position: Int, id: Long) = onChanged(position)
+        }
+    }
+
+    private fun languageBox(label: String, spinner: Spinner) = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        background = rounded(0xFFFFFFFF.toInt(), 10, 0xFFD5DCEF.toInt())
+        setPadding(dp(10), dp(4), dp(4), dp(2))
+        addView(TextView(this@MainActivity).apply { text = label; textSize = 12f; setTextColor(0xFF666666.toInt()) })
+        addView(spinner)
+    }
+
+    private fun bigButton(label: String, color: Int, onClick: () -> Unit) = Button(this).apply {
+        text = label; textSize = 18f; isAllCaps = false
+        setTextColor(0xFFFFFFFF.toInt()); setTypeface(typeface, Typeface.BOLD)
+        background = rounded(color, 12)
+        setPadding(0, dp(14), 0, dp(14))
+        setOnClickListener { onClick() }
     }
 
     /**
      * Android 15(targetSdk 35)부터는 앱 화면이 상태바/내비게이션바 밑까지 그려진다.
-     * 그래서 위쪽 상대방 버튼이 상태바에, 아래쪽 내 버튼이 내비게이션바에 가렸다.
-     * 시스템 바와 노치 크기만큼 안쪽 여백을 줘서 버튼이 다 보이게 한다.
+     * 시스템 바와 노치 크기만큼 안쪽 여백을 줘서 버튼이 가리지 않게 한다.
      */
     private fun keepClearOfSystemBars(view: View) {
         view.setOnApplyWindowInsetsListener { v, insets ->
@@ -154,56 +232,38 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         view.requestApplyInsets()
     }
 
-    private fun buildSide(
-        title: String, sourceHint: String, translatedHint: String,
-        color: Int, initialLang: Int, onLangChanged: (Int) -> Unit
-    ): Side {
-        val panel = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(20, 8, 20, 8)
-        }
-        val header = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
-        }
-        header.addView(TextView(this).apply {
-            text = title; textSize = 18f; setTextColor(color)
-        }, LinearLayout.LayoutParams(0, -2, 1f))
-        val spinner = Spinner(this).apply {
-            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, languages.map { it.label })
-            setSelection(initialLang)
-            onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-                override fun onNothingSelected(p0: AdapterView<*>?) {}
-                override fun onItemSelected(p0: AdapterView<*>?, v: View?, position: Int, id: Long) {
-                    onLangChanged(position)
-                }
-            }
-        }
-        header.addView(spinner, LinearLayout.LayoutParams(0, -2, 1.4f))
-
-        val translated = bubble(translatedHint, 20f, 0xFF17233D.toInt())
-        val source = bubble(sourceHint, 14f, 0xFF666666.toInt())
-        val button = Button(this).apply {
-            textSize = 18f
-            minHeight = 0; minimumHeight = 0
-            setPadding(0, 22, 0, 22)
-            setTextColor(0xFFFFFFFF.toInt()); setBackgroundColor(color)
-        }
-
-        // 버튼을 패널의 맨 처음에 둔다. 아래쪽(나) 패널에서는 화면 가운데 쪽,
-        // 180도 돌린 위쪽(상대방) 패널에서도 화면 가운데 쪽에 오게 된다.
-        // 그래서 상태바나 내비게이션바가 있어도 두 버튼은 가운데에 모여 항상 눌린다.
-        panel.addView(button, LinearLayout.LayoutParams(-1, -2))
-        panel.addView(header, LinearLayout.LayoutParams(-1, -2).apply { topMargin = 4 })
-        // 번역(내가 읽을 글)은 남는 공간을 쓰고 길면 스크롤, 원문은 작게
-        panel.addView(ScrollView(this).apply { addView(translated) },
-            LinearLayout.LayoutParams(-1, 0, 1f).apply { topMargin = 4 })
-        panel.addView(source, LinearLayout.LayoutParams(-1, -2).apply { topMargin = 4 })
-        return Side(panel, source, translated, button)
+    private fun updateButtons() {
+        startButton.alpha = if (running) 0.45f else 1f
+        stopButton.alpha = if (running) 1f else 0.45f
     }
 
-    private fun bubble(s: String, size: Float, color: Int) = TextView(this).apply {
-        text = s; textSize = size; setTextColor(color)
-        setBackgroundColor(0xFFFFFFFF.toInt()); setPadding(16, 10, 16, 10)
+    /** 대화 카드 하나 추가: 누가 · 어느 언어 → 어느 언어 / 원문(작게) / 번역(크게) */
+    private fun addCard(who: Speaker, from: Lang, to: Lang, original: String, translated: String) {
+        log.findViewWithTag<View>("hint")?.let { log.removeView(it) }
+        val color = if (who == Speaker.ME) blue else green
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = rounded(0xFFFFFFFF.toInt(), 12)
+            setPadding(dp(14), dp(10), dp(14), dp(12))
+        }
+        val bar = View(this).apply { background = rounded(color, 3) }
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(bar, LinearLayout.LayoutParams(dp(6), -1))
+            addView(card, LinearLayout.LayoutParams(0, -2, 1f))
+        }
+        card.addView(TextView(this).apply {
+            text = "${if (who == Speaker.ME) "나" else "상대방"} · ${from.label} → ${to.label}"
+            textSize = 12f; setTextColor(color); setTypeface(typeface, Typeface.BOLD)
+        })
+        card.addView(TextView(this).apply { text = original; textSize = 14f; setTextColor(0xFF666666.toInt()) })
+        card.addView(TextView(this).apply {
+            text = translated; textSize = 21f; setTextColor(0xFF17233D.toInt())
+            setTypeface(typeface, Typeface.BOLD)
+        })
+        log.addView(row, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(10) })
+        while (log.childCount > 60) log.removeViewAt(0)   // 너무 많이 쌓이면 오래된 것부터 지움
+        logScroll.post { logScroll.fullScroll(View.FOCUS_DOWN) }
     }
 
     // ───────────────────────── 번역기 (방향마다 하나씩) ─────────────────────────
@@ -227,159 +287,221 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         var done = 0
         val onReady = {
             done++
-            if (done == 2 && meToOther === a) status.text = "준비 완료 · ${myLang.label} ↔ ${otherLang.label}"
+            if (done == 2 && meToOther === a && !running) status.text = "준비 완료 · ${myLang.label} ↔ ${otherLang.label}"
         }
-        a.downloadModelIfNeeded(conditions)
-            .addOnSuccessListener { onReady() }
-            .addOnFailureListener { if (meToOther === a) status.text = "번역 모델 다운로드 실패: 인터넷 연결을 확인하세요." }
-        b.downloadModelIfNeeded(conditions)
-            .addOnSuccessListener { onReady() }
-            .addOnFailureListener { if (meToOther === a) status.text = "번역 모델 다운로드 실패: 인터넷 연결을 확인하세요." }
+        val onFail = { _: Exception ->
+            if (meToOther === a) status.text = "번역 모델 다운로드 실패: 인터넷 연결을 확인하세요."
+        }
+        a.downloadModelIfNeeded(conditions).addOnSuccessListener { onReady() }.addOnFailureListener(onFail)
+        b.downloadModelIfNeeded(conditions).addOnSuccessListener { onReady() }.addOnFailureListener(onFail)
     }
 
-    // ───────────────────────── 듣기 ─────────────────────────
+    // ───────────────────────── 시작 / 종료 ─────────────────────────
 
     private fun requestAudioPermission() {
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED)
             requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 101)
     }
 
-    private fun onSpeakPressed(who: Speaker) {
-        // 듣는 중에 같은 버튼을 다시 누르면 중지
-        if (activeSpeaker == who) { stopListening("중지했습니다."); return }
+    private fun startInterpreting() {
+        if (running) return
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             requestAudioPermission(); return
         }
-        val recognizer = speech ?: run { status.text = "이 기기에서 음성인식을 사용할 수 없습니다."; return }
+        if (speech == null) { status.text = "이 기기에서 음성인식을 사용할 수 없습니다."; return }
         if (myLang.code == otherLang.code) { status.text = "나와 상대방의 언어를 다르게 골라 주세요."; return }
-
-        if (activeSpeaker != null) recognizer.cancel()   // 다른 사람이 듣는 중이었으면 넘겨받기
-        if (ttsReady) tts.stop()                          // 읽어 주는 중이면 끊고 바로 듣기
-
-        activeSpeaker = who
+        running = true
+        speaking = false
         updateButtons()
-        val lang = if (who == Speaker.ME) myLang else otherLang
+        listenOnce()
+    }
+
+    private fun stopInterpreting(message: String) {
+        running = false
+        speaking = false
+        speech?.cancel()
+        if (ttsReady) tts.stop()
+        updateButtons()
+        status.text = message
+    }
+
+    // ───────────────────────── 듣기 ─────────────────────────
+
+    private fun listenOnce() {
+        if (!running || speaking) return
+        val recognizer = speech ?: return
+        detectedTag = null
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, lang.speechTag)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, lang.speechTag)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, myLang.speechTag)
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+            // 구글 음성 인식에 "상대방 언어도 들릴 수 있다"고 알려 준다 (공식 문서에 없는 옵션이라 추측)
+            putExtra("android.speech.extra.EXTRA_ADDITIONAL_LANGUAGES", arrayOf(otherLang.speechTag))
+            if (Build.VERSION.SDK_INT >= 34) {
+                val both = arrayListOf(myLang.speechTag, otherLang.speechTag)
+                putExtra(RecognizerIntent.EXTRA_ENABLE_LANGUAGE_DETECTION, true)
+                putStringArrayListExtra(RecognizerIntent.EXTRA_LANGUAGE_DETECTION_ALLOWED_LANGUAGES, both)
+                putExtra(RecognizerIntent.EXTRA_ENABLE_LANGUAGE_SWITCH, RecognizerIntent.LANGUAGE_SWITCH_BALANCED)
+                putStringArrayListExtra(RecognizerIntent.EXTRA_LANGUAGE_SWITCH_ALLOWED_LANGUAGES, both)
+            }
         }
         try {
             recognizer.startListening(intent)
-            status.text = "${lang.label}로 말씀해 주세요..."
+            status.text = "🔴 듣는 중… 아무나 말하면 언어를 알아서 구분해요"
         } catch (_: Exception) {
-            stopListening("음성인식을 시작하지 못했습니다.")
+            stopInterpreting("음성인식을 시작하지 못했습니다.")
         }
     }
 
-    private fun stopListening(message: String?) {
-        speech?.cancel()
-        activeSpeaker = null
-        updateButtons()
-        if (message != null) status.text = message
-    }
-
-    private fun updateButtons() {
-        me.button.text = if (activeSpeaker == Speaker.ME) "■ 듣는 중 (누르면 중지)" else "🎙 내가 말하기"
-        // 상대방 버튼 글자는 우선 한국어로 둠 (상대 언어로 바꾸는 건 다음 버전)
-        other.button.text = if (activeSpeaker == Speaker.OTHER) "■ 듣는 중 (누르면 중지)" else "🎙 상대방 말하기"
-        me.button.alpha = if (activeSpeaker == Speaker.OTHER) 0.5f else 1f
-        other.button.alpha = if (activeSpeaker == Speaker.ME) 0.5f else 1f
+    private fun resumeListening(delayMs: Long) {
+        runOnUiThread {
+            speaking = false
+            if (running) status.postDelayed({ listenOnce() }, delayMs)
+        }
     }
 
     private val listener = object : RecognitionListener {
         override fun onReadyForSpeech(params: Bundle?) {}
-        override fun onBeginningOfSpeech() { status.text = "듣고 있습니다..." }
+        override fun onBeginningOfSpeech() {}
         override fun onRmsChanged(rmsdB: Float) {}
         override fun onBufferReceived(buffer: ByteArray?) {}
-        override fun onEndOfSpeech() { status.text = "번역 중..." }
+        override fun onEndOfSpeech() { if (running) status.text = "번역 중..." }
         override fun onError(error: Int) {
-            if (activeSpeaker == null) return   // 직접 취소한 경우
-            val msg = when (error) {
-                SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT ->
-                    "말소리를 못 들었습니다. 다시 눌러 주세요."
+            if (!running || speaking) return
+            when (error) {
+                SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> {
+                    stopInterpreting("마이크 권한을 허용해 주세요."); requestAudioPermission()
+                }
                 SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED, SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE ->
-                    "이 휴대폰은 이 언어 음성인식을 지원하지 않습니다."
-                SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT ->
-                    "음성인식 네트워크 오류입니다. 인터넷을 확인해 주세요."
-                else -> "음성인식 오류($error). 다시 눌러 주세요."
+                    stopInterpreting("이 휴대폰은 ${myLang.label} 음성인식을 지원하지 않습니다.")
+                // 말이 없거나 못 알아들은 경우 등은 조용히 다시 듣는다
+                else -> status.postDelayed({ listenOnce() }, 300)
             }
-            stopListening(msg)
         }
         override fun onResults(results: Bundle?) {
-            val who = activeSpeaker
             val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
-            activeSpeaker = null
-            updateButtons()
-            if (who != null && !text.isNullOrBlank()) translate(who, text)
-            else status.text = "말소리를 못 들었습니다. 다시 눌러 주세요."
+            if (!running) return
+            if (text.isNullOrBlank()) { status.postDelayed({ listenOnce() }, 300); return }
+            decideSpeaker(text) { who -> translate(who, text) }
         }
         override fun onPartialResults(partialResults: Bundle?) {
             val text = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
-            if (text.isNullOrBlank()) return
-            when (activeSpeaker) {
-                Speaker.ME -> me.sourceText.text = text
-                Speaker.OTHER -> other.sourceText.text = text
-                null -> {}
-            }
+            if (running && !text.isNullOrBlank()) status.text = "🔴 $text"
         }
         override fun onEvent(eventType: Int, params: Bundle?) {}
+        // Android 14 이상에서만 불림: 음성 인식이 감지한 언어
+        override fun onLanguageDetection(results: Bundle) {
+            detectedTag = results.getString(SpeechRecognizer.DETECTED_LANGUAGE)
+        }
+    }
+
+    // ───────────────────────── 누가 말했는지 구분 ─────────────────────────
+
+    private fun decideSpeaker(text: String, done: (Speaker) -> Unit) {
+        // 1) Android 14 이상: 음성 인식이 알려 준 언어
+        detectedTag?.let { tag ->
+            val prefix = tag.substringBefore('-').lowercase()
+            if (prefix == otherLang.speechTag.substringBefore('-')) { done(Speaker.OTHER); return }
+            if (prefix == myLang.speechTag.substringBefore('-')) { done(Speaker.ME); return }
+        }
+        // 2) 문자 종류로 구분 (한글/가나/한자/태국 문자/로마자)
+        scriptGuess(text)?.let { done(it); return }
+        // 3) 둘 다 로마자 언어 등: ML Kit 언어 감지
+        languageId.identifyLanguage(text)
+            .addOnSuccessListener { code ->
+                done(if (code == otherLang.code) Speaker.OTHER else Speaker.ME)
+            }
+            .addOnFailureListener { done(Speaker.ME) }
+    }
+
+    private fun scriptOf(c: Char): Script? = when {
+        c in '가'..'힣' || c in 'ᄀ'..'ᇿ' || c in '㄰'..'㆏' -> Script.HANGUL
+        c in '぀'..'ヿ' -> Script.KANA
+        c in '一'..'鿿' -> Script.HAN
+        c in '฀'..'๿' -> Script.THAI
+        c.isLetter() && c.code < 0x2000 -> Script.LATIN
+        else -> null
+    }
+
+    private fun scriptGuess(text: String): Speaker? {
+        if (myLang.script == otherLang.script) return null
+        val counts = text.mapNotNull { scriptOf(it) }.groupingBy { it }.eachCount()
+        fun score(l: Lang): Int = when (l.script) {
+            // 일본어는 한자도 섞어 쓰니 가나+한자를 함께 센다
+            Script.KANA -> (counts[Script.KANA] ?: 0) + (counts[Script.HAN] ?: 0)
+            else -> counts[l.script] ?: 0
+        }
+        val mine = score(myLang)
+        val theirs = score(otherLang)
+        if (mine == theirs) return null
+        return if (mine > theirs) Speaker.ME else Speaker.OTHER
     }
 
     // ───────────────────────── 번역 + 읽어 주기 ─────────────────────────
 
     private fun translate(who: Speaker, text: String) {
-        val speakerSide = if (who == Speaker.ME) me else other
-        val listenerSide = if (who == Speaker.ME) other else me
+        val from = if (who == Speaker.ME) myLang else otherLang
+        val to = if (who == Speaker.ME) otherLang else myLang
         val translator = if (who == Speaker.ME) meToOther else otherToMe
-        val targetLang = if (who == Speaker.ME) otherLang else myLang
-
-        speakerSide.sourceText.text = text
-        if (translator == null) { status.text = "번역기를 준비하고 있습니다."; return }
-        status.text = "번역 중..."
+        if (translator == null) {
+            status.text = "번역기를 준비하고 있습니다."
+            resumeListening(300); return
+        }
         translator.translate(text).addOnSuccessListener { result ->
-            // 번역 결과는 듣는 사람 쪽 화면에 크게 보여 줌
-            listenerSide.translatedText.text = result
-            status.text = "${myLang.label} ↔ ${otherLang.label}"
-            speak(result, targetLang)
+            addCard(who, from, to, text, result)
+            speak(result, to)
         }.addOnFailureListener {
             status.text = "번역에 실패했습니다. 모델 다운로드가 끝났는지 확인해 주세요."
+            resumeListening(300)
         }
     }
 
+    /** 마이크를 끄고 번역문을 읽는다. 다 읽으면 다시 듣는다. */
     private fun speak(text: String, lang: Lang) {
-        if (!ttsReady) return
-        // 읽는 동안 마이크는 꺼져 있어야 함 (자기 목소리를 다시 번역하지 않도록)
-        if (activeSpeaker != null) stopListening(null)
+        if (!running) return
+        if (!ttsReady) { resumeListening(300); return }
         val r = tts.setLanguage(lang.ttsLocale)
         if (r == TextToSpeech.LANG_MISSING_DATA || r == TextToSpeech.LANG_NOT_SUPPORTED) {
-            status.text = "이 휴대폰은 ${lang.label} 읽어 주기를 지원하지 않습니다. 화면 글자를 보여 주세요."
-            return
+            status.text = "이 휴대폰은 ${lang.label} 읽어 주기를 지원하지 않습니다."
+            resumeListening(800); return
         }
-        tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "translated")
+        speaking = true
+        speech?.cancel()
+        status.text = "🔈 읽는 중... (마이크 꺼짐)"
+        if (tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, UTTERANCE_ID) == TextToSpeech.ERROR) resumeListening(300)
     }
 
     override fun onInit(statusCode: Int) {
         if (statusCode != TextToSpeech.SUCCESS) return
         ttsReady = true
         tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-            override fun onStart(utteranceId: String?) {
-                runOnUiThread { status.text = "읽어 주는 중..." }
-            }
+            override fun onStart(utteranceId: String?) {}
             override fun onDone(utteranceId: String?) {
-                runOnUiThread { if (activeSpeaker == null) status.text = "${myLang.label} ↔ ${otherLang.label}" }
+                if (utteranceId == UTTERANCE_ID) resumeListening(RESUME_DELAY_MS)
             }
             @Deprecated("Deprecated in Java")
-            override fun onError(utteranceId: String?) {}
+            override fun onError(utteranceId: String?) {
+                if (utteranceId == UTTERANCE_ID) resumeListening(RESUME_DELAY_MS)
+            }
+            override fun onStop(utteranceId: String?, interrupted: Boolean) {
+                if (utteranceId == UTTERANCE_ID) resumeListening(RESUME_DELAY_MS)
+            }
         })
     }
 
     override fun onDestroy() {
+        running = false
         speech?.destroy()
         if (::tts.isInitialized) tts.shutdown()
         meToOther?.close(); otherToMe?.close()
+        languageId.close()
         super.onDestroy()
+    }
+
+    companion object {
+        private const val UTTERANCE_ID = "translated"
+        /** 다 읽은 뒤 스피커 잔향이 잡히지 않도록 잠깐 기다렸다가 다시 듣는다 */
+        private const val RESUME_DELAY_MS = 400L
     }
 }
