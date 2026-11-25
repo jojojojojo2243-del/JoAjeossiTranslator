@@ -1,0 +1,31 @@
+plugins {
+    id("com.android.application")
+    id("org.jetbrains.kotlin.android")
+}
+
+android {
+    namespace = "com.joajeossi.translator"
+    compileSdk = 35
+
+    defaultConfig {
+        applicationId = "com.joajeossi.translator"
+        minSdk = 23
+        targetSdk = 35
+        versionCode = 1
+        versionName = "1.0.0"
+    }
+
+    // Java와 Kotlin의 JVM 대상 버전을 모두 17로 맞춥니다.
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = "17"
+    }
+}
+
+dependencies {
+    implementation("com.google.mlkit:translate:17.0.3")
+}
