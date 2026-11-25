@@ -157,7 +157,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     ): Side {
         val panel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(24, 20, 24, 20)
+            setPadding(20, 8, 20, 8)
         }
         val header = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
@@ -177,25 +177,30 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         }
         header.addView(spinner, LinearLayout.LayoutParams(0, -2, 1.4f))
 
-        val translated = bubble(translatedHint, 22f, 0xFF17233D.toInt())
-        val source = bubble(sourceHint, 15f, 0xFF666666.toInt())
+        val translated = bubble(translatedHint, 20f, 0xFF17233D.toInt())
+        val source = bubble(sourceHint, 14f, 0xFF666666.toInt())
         val button = Button(this).apply {
-            textSize = 20f
+            textSize = 18f
+            minHeight = 0; minimumHeight = 0
+            setPadding(0, 22, 0, 22)
             setTextColor(0xFFFFFFFF.toInt()); setBackgroundColor(color)
         }
 
-        panel.addView(header)
-        // 번역(내가 읽을 글)은 크게, 내가 한 말(원문)은 작게
+        // 버튼을 패널의 맨 처음에 둔다. 아래쪽(나) 패널에서는 화면 가운데 쪽,
+        // 180도 돌린 위쪽(상대방) 패널에서도 화면 가운데 쪽에 오게 된다.
+        // 그래서 상태바나 내비게이션바가 있어도 두 버튼은 가운데에 모여 항상 눌린다.
+        panel.addView(button, LinearLayout.LayoutParams(-1, -2))
+        panel.addView(header, LinearLayout.LayoutParams(-1, -2).apply { topMargin = 4 })
+        // 번역(내가 읽을 글)은 남는 공간을 쓰고 길면 스크롤, 원문은 작게
         panel.addView(ScrollView(this).apply { addView(translated) },
-            LinearLayout.LayoutParams(-1, 0, 1f).apply { topMargin = 12 })
-        panel.addView(source, LinearLayout.LayoutParams(-1, -2).apply { topMargin = 8 })
-        panel.addView(button, LinearLayout.LayoutParams(-1, -2).apply { topMargin = 12 })
+            LinearLayout.LayoutParams(-1, 0, 1f).apply { topMargin = 4 })
+        panel.addView(source, LinearLayout.LayoutParams(-1, -2).apply { topMargin = 4 })
         return Side(panel, source, translated, button)
     }
 
     private fun bubble(s: String, size: Float, color: Int) = TextView(this).apply {
         text = s; textSize = size; setTextColor(color)
-        setBackgroundColor(0xFFFFFFFF.toInt()); setPadding(18, 16, 18, 16)
+        setBackgroundColor(0xFFFFFFFF.toInt()); setPadding(16, 10, 16, 10)
     }
 
     // ───────────────────────── 번역기 (방향마다 하나씩) ─────────────────────────
