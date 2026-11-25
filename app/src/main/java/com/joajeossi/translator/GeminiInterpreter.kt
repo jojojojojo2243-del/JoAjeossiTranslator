@@ -15,7 +15,7 @@ import kotlin.math.sqrt
 /**
  * 인터넷(구글 Gemini)으로 "무슨 언어로 말했는지"를 알아서 구분하는 통역기.
  *
- * 1) 마이크로 계속 듣다가, 소리가 커지면 말 시작 / 0.8초쯤 조용하면 말 끝으로 본다.
+ * 1) 마이크로 계속 듣다가, 소리가 커지면 말 시작 / 1.2초쯤 조용하면 말 끝으로 (잠깐 멈췄다 이어 말해도 한 마디로) 본다.
  * 2) 그 한 마디를 녹음 파일(WAV)로 만들어 Gemini 에 보낸다.
  * 3) Gemini 가 "어느 언어인지 + 받아 적은 글 + 반대 언어로 번역"을 돌려준다.
  *
@@ -229,7 +229,8 @@ class GeminiInterpreter(
         private const val FRAME = 480                     // 30ms
         private const val PRE_ROLL_FRAMES = 10            // 0.3초
         private const val START_FRAMES = 3                // 0.09초 이상 소리가 크면 말 시작
-        private const val END_SILENCE_FRAMES = 27         // 0.8초 조용하면 말 끝
+        // 말하다 잠깐 멈춰도(생각하느라) 끊기지 않게 1.2초 조용해야 말 끝으로 본다
+        private const val END_SILENCE_FRAMES = 40
         private const val MIN_VOICED_FRAMES = 10          // 0.3초보다 짧은 소리는 무시 (기침, 탁 소리 등)
         private const val MAX_FRAMES = 500                // 한 마디 최대 15초
         /** 앞에서부터 써 보고, 없는 모델이면 다음 것 */
