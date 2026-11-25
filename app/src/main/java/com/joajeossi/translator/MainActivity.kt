@@ -66,7 +66,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         val from = Spinner(this)
         val to = Spinner(this)
         val languages = listOf("영어" to TranslateLanguage.ENGLISH, "일본어" to TranslateLanguage.JAPANESE,
-            "중국어" to TranslateLanguage.CHINESE, "태국어" to TranslateLanguage.THAI, "한국어" to TranslateLanguage.KOREAN)
+            "중국어" to TranslateLanguage.CHINESE, "한국어" to TranslateLanguage.KOREAN)
         val adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, languages.map { it.first })
         from.adapter = adapter; to.adapter = adapter
         from.setSelection(0); to.setSelection(3)
@@ -77,7 +77,6 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                 sourceLocale = when(sourceCode) {
                     TranslateLanguage.JAPANESE -> "ja-JP"
                     TranslateLanguage.CHINESE -> "zh-CN"
-                    TranslateLanguage.THAI -> "th-TH"
                     TranslateLanguage.KOREAN -> "ko-KR"
                     else -> "en-US"
                 }
@@ -91,7 +90,6 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                 targetLocale = when(targetCode) {
                     TranslateLanguage.JAPANESE -> Locale.JAPANESE
                     TranslateLanguage.CHINESE -> Locale.SIMPLIFIED_CHINESE
-                    TranslateLanguage.THAI -> Locale("th", "TH")
                     TranslateLanguage.ENGLISH -> Locale.US
                     else -> Locale.KOREAN
                 }
